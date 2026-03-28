@@ -30,7 +30,7 @@ MODEL = os.environ.get("MODEL", "zai-org/GLM-5-FP8")
 
 # Limits
 MAX_STEPS = int(os.environ.get("MAX_STEPS", "20"))
-SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "1800"))  # 30 min
+SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "1500"))  # 25 min
 COMMAND_TIMEOUT = int(os.environ.get("COMMAND_TIMEOUT", "60"))
 
 # === PATHS ===
