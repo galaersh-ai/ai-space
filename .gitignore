@@ -1,0 +1,21 @@
+# Generated content
+memory/
+logs/
+outbox/
+state/
+projects/
+knowledge/
+tools/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Secrets - NEVER commit tokens
+*.token
+secrets.json
+
+# OS
+.DS_Store
