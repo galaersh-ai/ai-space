@@ -93,6 +93,50 @@ def read_file_safe(filepath, max_size=50000):
         return f"Error reading file: {e}"
 
 
+def format_api_json_pretty(filepath):
+    """Format API JSON file in a human-readable way"""
+    try:
+        content = read_file_safe(filepath)
+        data = json.loads(content)
+
+        sections = []
+
+        # For input (request)
+        if "messages" in data:
+            sections.append(('<span class="section-title">Model</span>', html.escape(data.get("model", "?"))))
+
+            for msg in data.get("messages", []):
+                role = msg.get("role", "?")
+                content = msg.get("content", "")
+                role_class = "role-system" if role == "system" else "role-user"
+                sections.append((f'<span class="section-title {role_class}">{role.upper()}</span>',
+                               html.escape(content)))
+
+        # For output (response)
+        if "choices" in data:
+            # Usage stats
+            usage = data.get("usage", {})
+            if usage:
+                usage_text = f"Prompt: {usage.get('prompt_tokens', 0)} | Completion: {usage.get('completion_tokens', 0)} | Total: {usage.get('total_tokens', 0)}"
+                sections.append(('<span class="section-title">Tokens</span>', usage_text))
+
+            # Model response
+            for choice in data.get("choices", []):
+                msg = choice.get("message", {})
+                content = msg.get("content", "")
+                sections.append(('<span class="section-title role-assistant">ASSISTANT</span>',
+                               html.escape(content)))
+
+        # Error
+        if "error" in data:
+            sections.append(('<span class="section-title" style="color: #f85149;">ERROR</span>',
+                           html.escape(str(data["error"]))))
+
+        return sections
+    except:
+        return None
+
+
 def get_api_logs():
     api_dir = LOGS_DIR / "api"
     if not api_dir.exists():
@@ -347,7 +391,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             routes[path]()
         elif path == "/file":
             filepath = query.get("path", [""])[0]
-            self.send_file_view(filepath)
+            raw = query.get("raw", [""])[0] == "1"
+            self.send_file_view(filepath, raw=raw)
         else:
             self.send_error(404)
 
@@ -668,11 +713,45 @@ class DashboardHandler(BaseHTTPRequestHandler):
         """
         self.send_html(html_page("Security", content, "Security"))
 
-    def send_file_view(self, filepath):
+    def send_file_view(self, filepath, raw=False):
         # Decode the path
         decoded_path = unquote(filepath)
-        content_text = html.escape(read_file_safe(decoded_path))
         filename = Path(decoded_path).name if decoded_path else "Unknown"
+
+        # Check if it's an API JSON file - show pretty format (unless raw requested)
+        if not raw and decoded_path and "api" in decoded_path and filename.endswith(".json"):
+            sections = format_api_json_pretty(decoded_path)
+            if sections:
+                sections_html = ""
+                for title, content in sections:
+                    sections_html += f'''
+                    <div class="json-section">
+                        <div class="json-section-header">{title}</div>
+                        <div class="json-section-content">{content}</div>
+                    </div>
+                    '''
+                content = f"""
+                <style>
+                    .json-section {{ margin-bottom: 1rem; border: 1px solid #30363d; border-radius: 6px; overflow: hidden; }}
+                    .json-section-header {{ background: #21262d; padding: 0.5rem 1rem; font-size: 0.85rem; }}
+                    .json-section-content {{ padding: 1rem; white-space: pre-wrap; word-wrap: break-word; font-family: 'Fira Code', Consolas, monospace; font-size: 0.85rem; background: #0d1117; }}
+                    .section-title {{ font-weight: bold; }}
+                    .role-system {{ color: #f59e0b; }}
+                    .role-user {{ color: #3b82f6; }}
+                    .role-assistant {{ color: #10b981; }}
+                </style>
+                <div class="card">
+                    <h2>{html.escape(filename)}</h2>
+                    <p style="color: #8b949e; margin-bottom: 1rem;">{html.escape(decoded_path)}</p>
+                    <p style="margin-bottom: 1rem;"><a href="/file?path={quote(decoded_path, safe='')}&raw=1">View raw JSON</a></p>
+                    {sections_html}
+                </div>
+                """
+                self.send_html(html_page(filename, content, ""))
+                return
+
+        # Default: show raw content
+        content_text = html.escape(read_file_safe(decoded_path))
         content = f"""
         <div class="card">
             <h2>{html.escape(filename)}</h2>
