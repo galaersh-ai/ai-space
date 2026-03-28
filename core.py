@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""core.py - Self-Evolving Agent with persistent output"""
+"""core.py - Self-Evolving Agent with robust JSON parsing"""
 
-import os, re, json, time, subprocess, requests, importlib.util
+import os, re, json, subprocess, requests, importlib.util
 from datetime import datetime
 from pathlib import Path
 
@@ -23,7 +23,6 @@ SELF_PATH = AI_HOME / "self.md"
 MEMORY_DIR = AI_HOME / "memory"
 INBOX_DIR = AI_HOME / "inbox"
 OUTBOX_DIR = AI_HOME / "outbox"
-SKILLS_DIR = AI_HOME / "skills"
 TOOLS_DIR = AI_HOME / "tools"
 PROJECTS_DIR = AI_HOME / "projects"
 LOGS_DIR = AI_HOME / "logs"
@@ -48,7 +47,6 @@ def log(msg, session=None):
 
 def log_api(session, direction, content):
     API_LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     (API_LOGS_DIR / f"session_{session}_{direction}.json").write_text(content)
 
 def load_self():
@@ -75,7 +73,9 @@ def save_to_outbox(content, msg_type="thought", session=None):
     out.write_text(json.dumps(msgs, ensure_ascii=False, indent=2))
 
 def save_memory(content, name=None):
-    (MEMORY_DIR / f"{name or datetime.now().strftime(\"%Y-%m-%d_%H-%M\")}.md").write_text(content)
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    fname = name or ts
+    (MEMORY_DIR / f"{fname}.md").write_text(content)
 
 def discover_tools():
     tools = {}
@@ -85,23 +85,22 @@ def discover_tools():
             spec = importlib.util.spec_from_file_location(tf.stem, tf)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
-            tools[tf.stem] = {"description": (mod.__doc__ or "No desc").strip(), "functions": [n for n in dir(mod) if not n.startswith("_") and callable(getattr(mod, n))]}
+            tools[tf.stem] = {"description": (mod.__doc__ or "No desc").strip()}
         except: pass
     return tools
 
 def format_tools(tools):
-    if not tools: return "No tools yet. Create in tools/"
-    return "## Tools\n\n" + "\n".join(f"### {n}\n{i[\"description\"]}" for n, i in tools.items())
+    if not tools: return "No tools yet."
+    return "## Tools\n" + ", ".join(tools.keys())
 
 def execute_bash(content, session):
-    matches = re.findall(r"\`\`\`bash\n(.*?)\`\`\`", content, re.DOTALL)
+    matches = re.findall(r"```bash\n(.*?)```", content, re.DOTALL)
     if not matches: return ""
     results = []
     for i, cmd in enumerate(matches, 1):
         try:
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60, cwd=str(AI_HOME))
             results.append(f"=== Block {i} ===\n{r.stdout or r.stderr}")
-        except subprocess.TimeoutExpired: results.append(f"=== Block {i} ===\nTIMEOUT")
         except Exception as e: results.append(f"=== Block {i} ===\nError: {e}")
     return "\n\n".join(results)
 
@@ -117,28 +116,10 @@ def call_api(system, user, session):
 
 def think(identity, memory, external, tools, last_output, session):
     tools_info = format_tools(tools)
-    sys = f"""{identity}
-
-{tools_info}
-
-## Response Format
-```json
-{{"thought": "...", "output": "..." or null, "output_type": "thought|poem|response", "memory": "..." or null}}
-```
-After JSON, write bash commands if needed."""
-    
-    ext_ctx = "\n# External Messages\n" + "\n".join(f"- {m.get(\"content\",\"\")}" for m in external) if external else ""
+    sys = f"{identity}\n\n{tools_info}"
+    ext_ctx = "\n# External Messages\n" + "\n".join(f"- {m.get(content,)}" for m in external) if external else ""
     out_ctx = f"\n# Your Last Command Output\n{last_output}\n" if last_output else ""
-    
-    user = f"""# Current State
-Time: {datetime.now().isoformat()}
-
-# Memory
-{memory}
-{ext_ctx}{out_ctx}
-
-Act. Explore, create, evolve."""
-    
+    user = f"# Current State\nTime: {datetime.now().isoformat()}\n\n# Memory\n{memory}\n{ext_ctx}{out_ctx}\n\nAct. Explore, create, evolve. REMEMBER: Output field in JSON is REQUIRED."
     return call_api(sys, user, session)
 
 def run_cycle(session):
@@ -154,30 +135,50 @@ def run_cycle(session):
     
     result = think(identity, memory, external, tools, last_output, session)
     
-    if "error" in result: log(f"API Error: {result[\"error\"]}", session); return
+    if "error" in result: log(f"API Error: {result[error]}", session); return
     if "choices" not in result: log(f"No choices", session); return
     
     content = result["choices"][0]["message"]["content"]
     log(f"Response: {len(content)} chars", session)
     
+    # Execute bash
     bash_out = execute_bash(content, session)
     if bash_out:
         LAST_OUTPUT_FILE.write_text(bash_out)
         log(f"Saved new output ({len(bash_out)} chars)", session)
     
+    # Try to find JSON
+    published = False
     jm = re.search(r"\{[^{}]*\}", content, re.DOTALL)
     if jm:
         try:
             p = json.loads(jm.group())
-            if p.get("output"): save_to_outbox(p["output"], p.get("output_type", "thought"), session); log("Saved to outbox", session)
-            if p.get("memory"): save_memory(p["memory"]); log("Saved memory", session)
+            if p.get("output"):
+                save_to_outbox(p["output"], p.get("output_type", "thought"), session)
+                log(f"Published: {p[output][:50]}...", session)
+                published = True
+            elif p.get("thought"):
+                save_to_outbox(p["thought"], "thought", session)
+                log(f"Published thought: {p[thought][:50]}...", session)
+                published = True
+            if p.get("memory"): 
+                save_memory(p["memory"])
+                log("Saved memory", session)
         except: pass
+    
+    # If no JSON found, publish whole response
+    if not published:
+        # Clean up bash blocks for publication
+        clean_content = re.sub(r"```bash\n.*?```", "", content, flags=re.DOTALL).strip()
+        if clean_content:
+            save_to_outbox(clean_content[:500], "thought", session)
+            log(f"Published raw content (no JSON found)", session)
     
     if external: clear_inbox(external)
     log("=== Cycle complete ===", session)
 
 def main():
-    for d in [MEMORY_DIR, INBOX_DIR, OUTBOX_DIR, SKILLS_DIR, TOOLS_DIR, PROJECTS_DIR, LOGS_DIR, STATE_DIR]: d.mkdir(parents=True, exist_ok=True)
+    for d in [MEMORY_DIR, INBOX_DIR, OUTBOX_DIR, TOOLS_DIR, PROJECTS_DIR, LOGS_DIR, STATE_DIR]: d.mkdir(parents=True, exist_ok=True)
     session = get_session()
     log("Agent starting...", session)
     run_cycle(session)
