@@ -192,12 +192,38 @@ def get_all_files_stats():
     count = len(get_outbox_messages())
     if count: stats.append(("outbox", count, "#ef4444"))
 
-    # API logs
-    api_dir = LOGS_DIR / "api"
-    count = len(list(api_dir.iterdir())) if api_dir.exists() else 0
-    if count: stats.append(("api_logs", count, "#06b6d4"))
-
     return stats
+
+
+def get_api_logs_filtered(session_filter=None, limit=20):
+    """Get API logs with optional session filter"""
+    api_dir = LOGS_DIR / "api"
+    if not api_dir.exists():
+        return [], 0
+
+    all_files = list(api_dir.iterdir())
+    total_count = len(all_files)
+
+    # Filter by session if provided
+    if session_filter:
+        all_files = [f for f in all_files if f"session_{session_filter}_" in f.name]
+
+    # Sort by modification time
+    all_files = sorted(all_files, key=lambda x: x.stat().st_mtime, reverse=True)
+
+    # Apply limit (0 = no limit)
+    if limit > 0:
+        all_files = all_files[:limit]
+
+    files = []
+    for f in all_files:
+        files.append({
+            "name": f.name,
+            "path": str(f),
+            "size": f.stat().st_size,
+            "modified": datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        })
+    return files, total_count
 
 
 # HTML Templates
@@ -313,7 +339,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/security": self.send_security,
         }
 
-        if path in routes:
+        if path == "/api-logs":
+            session = query.get("session", [""])[0]
+            show_all = query.get("all", [""])[0] == "1"
+            self.send_api_logs(session_filter=session, show_all=show_all)
+        elif path in routes:
             routes[path]()
         elif path == "/file":
             filepath = query.get("path", [""])[0]
@@ -565,24 +595,54 @@ class DashboardHandler(BaseHTTPRequestHandler):
         """
         self.send_html(html_page("Outbox", content, "Outbox"))
 
-    def send_api_logs(self):
-        files = get_api_logs()
+    def send_api_logs(self, session_filter="", show_all=False):
+        limit = 0 if show_all else 20
+        files, total_count = get_api_logs_filtered(session_filter=session_filter or None, limit=limit)
+
         rows = ""
         for f in files:
+            # Extract session number from filename
+            session_num = ""
+            if "session_" in f["name"]:
+                parts = f["name"].split("_")
+                if len(parts) >= 2:
+                    session_num = parts[1]
+
             badge = "badge-green" if "output" in f["name"] else "badge-blue"
             rows += f'''<tr>
                 <td>{make_file_link(f["path"], f["name"])}</td>
+                <td><a href="/api-logs?session={session_num}">{session_num}</a></td>
                 <td><span class="badge {badge}">{"response" if "output" in f["name"] else "request"}</span></td>
                 <td>{f["size"]} bytes</td>
                 <td>{f["modified"]}</td>
             </tr>'''
 
+        # Build filter info
+        filter_info = ""
+        if session_filter:
+            filter_info = f'for session <strong>{session_filter}</strong> (<a href="/api-logs">clear filter</a>)'
+        showing_info = f"Showing {len(files)} of {total_count} files {filter_info}"
+
         content = f"""
+        <div class="card" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
+            <div>
+                <span style="font-size: 1.5rem; color: #58a6ff; font-weight: bold;">{total_count}</span>
+                <span style="color: #8b949e;"> total API log files</span>
+            </div>
+            <form action="/api-logs" method="get" style="display: flex; gap: 0.5rem; align-items: center;">
+                <input type="text" name="session" placeholder="Session #" value="{html.escape(session_filter)}"
+                    style="background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 0.4rem 0.8rem; color: #c9d1d9; width: 100px;">
+                <button type="submit" style="background: #238636; border: none; border-radius: 4px; padding: 0.4rem 0.8rem; color: white; cursor: pointer;">Search</button>
+                <a href="/api-logs?all=1" style="padding: 0.4rem 0.8rem; background: #21262d; border-radius: 4px; font-size: 0.9rem;">Show All</a>
+            </form>
+        </div>
+
         <div class="card">
-            <h2>API Logs (last 20)</h2>
+            <h2>API Logs</h2>
+            <p style="color: #8b949e; margin-bottom: 1rem;">{showing_info}</p>
             <table>
-                <tr><th>File</th><th>Type</th><th>Size</th><th>Time</th></tr>
-                {rows if rows else '<tr><td colspan="4" class="empty">No API logs yet</td></tr>'}
+                <tr><th>File</th><th>Session</th><th>Type</th><th>Size</th><th>Time</th></tr>
+                {rows if rows else '<tr><td colspan="5" class="empty">No API logs found</td></tr>'}
             </table>
         </div>
         """
