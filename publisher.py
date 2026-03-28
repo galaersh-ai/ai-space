@@ -16,9 +16,6 @@ if env_file.exists():
 TG_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 TG_CHAT = os.environ.get("TG_CHAT_ID", "")
 
-print(f"Token: {TG_TOKEN[:15]}...")
-print(f"Chat: {TG_CHAT}")
-
 def publish():
     if not OUTBOX.exists():
         print("No outbox file")

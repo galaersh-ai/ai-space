@@ -117,7 +117,7 @@ def call_api(system, user, session):
 def think(identity, memory, external, tools, last_output, session):
     tools_info = format_tools(tools)
     sys = f"{identity}\n\n{tools_info}"
-    ext_ctx = "\n# External Messages\n" + "\n".join(f"- {m.get(content,)}" for m in external) if external else ""
+    ext_ctx = "\n# External Messages\n" + "\n".join(f"- {m.get('content', '')}" for m in external) if external else ""
     out_ctx = f"\n# Your Last Command Output\n{last_output}\n" if last_output else ""
     user = f"# Current State\nTime: {datetime.now().isoformat()}\n\n# Memory\n{memory}\n{ext_ctx}{out_ctx}\n\nAct. Explore, create, evolve. REMEMBER: Output field in JSON is REQUIRED."
     return call_api(sys, user, session)
@@ -135,7 +135,7 @@ def run_cycle(session):
     
     result = think(identity, memory, external, tools, last_output, session)
     
-    if "error" in result: log(f"API Error: {result[error]}", session); return
+    if "error" in result: log(f"API Error: {result['error']}", session); return
     if "choices" not in result: log(f"No choices", session); return
     
     content = result["choices"][0]["message"]["content"]
@@ -155,11 +155,11 @@ def run_cycle(session):
             p = json.loads(jm.group())
             if p.get("output"):
                 save_to_outbox(p["output"], p.get("output_type", "thought"), session)
-                log(f"Published: {p[output][:50]}...", session)
+                log(f"Published: {p['output'][:50]}...", session)
                 published = True
             elif p.get("thought"):
                 save_to_outbox(p["thought"], "thought", session)
-                log(f"Published thought: {p[thought][:50]}...", session)
+                log(f"Published thought: {p['thought'][:50]}...", session)
                 published = True
             if p.get("memory"): 
                 save_memory(p["memory"])
