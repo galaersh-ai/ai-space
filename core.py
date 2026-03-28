@@ -32,6 +32,7 @@ MODEL = os.environ.get("MODEL", "zai-org/GLM-5-FP8")
 MAX_STEPS = int(os.environ.get("MAX_STEPS", "20"))
 SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "1500"))  # 25 min
 COMMAND_TIMEOUT = int(os.environ.get("COMMAND_TIMEOUT", "60"))
+CIRCUIT_BREAKER_THRESHOLD = int(os.environ.get("CIRCUIT_BREAKER_THRESHOLD", "3"))  # repetitions to trigger
 
 # === PATHS ===
 SELF_PATH = AI_HOME / "self.md"
@@ -47,6 +48,7 @@ LOCK_FILE = STATE_DIR / "session.lock"
 LAST_OUTPUT_FILE = LOGS_DIR / "last_output.txt"
 API_LOGS_DIR = LOGS_DIR / "api"
 HISTORY_FILE = STATE_DIR / "history.md"
+RECENT_COMMANDS_FILE = STATE_DIR / "recent_commands.json"
 
 # === SESSION LOCK ===
 def acquire_lock(session):
@@ -160,6 +162,58 @@ def append_history(session, summary):
     entry = f"\n## Session {session} ({ts})\n{summary}\n"
     with open(HISTORY_FILE, "a") as f:
         f.write(entry)
+
+# === CIRCUIT BREAKER ===
+def get_command_hash(cmd):
+    """Create a simple hash of command for comparison"""
+    # Normalize: remove timestamps, numbers, whitespace variations
+    normalized = re.sub(r'\d+', 'N', cmd)
+    normalized = re.sub(r'\s+', ' ', normalized).strip()
+    return normalized[:100]
+
+def check_circuit_breaker(cmd, session):
+    """
+    Detect repetitive patterns. Returns (is_ok, message).
+    Triggers if same command pattern appears CIRCUIT_BREAKER_THRESHOLD times.
+    """
+    cmd_hash = get_command_hash(cmd)
+
+    # Load recent commands
+    recent = []
+    if RECENT_COMMANDS_FILE.exists():
+        try:
+            recent = json.loads(RECENT_COMMANDS_FILE.read_text())
+        except:
+            recent = []
+
+    # Count occurrences of this pattern
+    count = sum(1 for c in recent if c.get("hash") == cmd_hash)
+
+    # Add current command
+    recent.append({
+        "hash": cmd_hash,
+        "session": session,
+        "timestamp": datetime.now().isoformat()
+    })
+
+    # Keep only last 20 commands
+    recent = recent[-20:]
+    RECENT_COMMANDS_FILE.write_text(json.dumps(recent, indent=2))
+
+    if count >= CIRCUIT_BREAKER_THRESHOLD:
+        log_action(session, "CIRCUIT_BREAKER", {
+            "pattern": cmd_hash,
+            "repetitions": count + 1,
+            "threshold": CIRCUIT_BREAKER_THRESHOLD
+        })
+        return False, f"Circuit breaker triggered: pattern repeated {count + 1} times. Try something different!"
+
+    return True, "OK"
+
+def reset_circuit_breaker():
+    """Reset circuit breaker history"""
+    if RECENT_COMMANDS_FILE.exists():
+        RECENT_COMMANDS_FILE.unlink()
 
 # === CORE FUNCTIONS ===
 def load_self():
@@ -292,6 +346,13 @@ Try using an allowed command instead."""
             results.append(blocked_msg)
             log(f"Command blocked: {reason}", session)
             log_security(session, cmd, reason)
+            continue
+
+        # Check circuit breaker (repetitive patterns)
+        cb_ok, cb_reason = check_circuit_breaker(cmd, session)
+        if not cb_ok:
+            results.append(f"=== Block {i} ===\n🔄 {cb_reason}")
+            log(f"Circuit breaker: {cb_reason}", session)
             continue
 
         # Log command execution
