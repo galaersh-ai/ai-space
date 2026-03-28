@@ -49,6 +49,14 @@ def log_api(session, direction, content):
     API_LOGS_DIR.mkdir(parents=True, exist_ok=True)
     (API_LOGS_DIR / f"session_{session}_{direction}.json").write_text(content)
 
+def log_security(session, cmd, reason):
+    """Log blocked command attempts to security.log"""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entry = f"[{ts}] [Session {session}] BLOCKED: {reason}\nCommand: {cmd[:200]}...\n{'='*50}\n"
+    print(f"🚨 SECURITY: {reason}")
+    with open(LOGS_DIR / "security.log", "a") as f:
+        f.write(entry)
+
 def load_self():
     return SELF_PATH.read_text() if SELF_PATH.exists() else "# Identity\n\nYou are a self-evolving AI agent.\n"
 
@@ -161,6 +169,7 @@ Allowed commands: {', '.join(sorted(ALLOWED_COMMANDS))}
 Try using an allowed command instead."""
             results.append(blocked_msg)
             log(f"Command blocked: {reason}", session)
+            log_security(session, cmd, reason)
             continue
         try:
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60, cwd=str(AI_HOME))
