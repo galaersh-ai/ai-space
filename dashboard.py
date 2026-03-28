@@ -11,7 +11,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote, unquote
 import html
 
 AI_HOME = Path("/root/ai_space")
@@ -21,6 +21,8 @@ MEMORY_DIR = AI_HOME / "memory"
 TOOLS_DIR = AI_HOME / "tools"
 PROJECTS_DIR = AI_HOME / "projects"
 OUTBOX_DIR = AI_HOME / "outbox"
+INBOX_DIR = AI_HOME / "inbox"
+SELF_PATH = AI_HOME / "self.md"
 
 PORT = int(os.environ.get("DASHBOARD_PORT", "8080"))
 
@@ -59,14 +61,15 @@ def get_history():
     return f.read_text() if f.exists() else "No history yet."
 
 
-def get_file_list(directory):
+def get_file_list(directory, pattern="*"):
     if not directory.exists():
         return []
     files = []
-    for f in sorted(directory.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+    for f in sorted(directory.glob(pattern), key=lambda x: x.stat().st_mtime if x.exists() else 0, reverse=True):
         if f.is_file():
             files.append({
                 "name": f.name,
+                "path": str(f),
                 "size": f.stat().st_size,
                 "modified": datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
             })
@@ -75,15 +78,17 @@ def get_file_list(directory):
 
 def read_file_safe(filepath, max_size=50000):
     try:
+        # Decode URL-encoded path
+        filepath = unquote(filepath)
         p = Path(filepath)
         # Security: only allow files within AI_HOME
         if not str(p.resolve()).startswith(str(AI_HOME.resolve())):
             return "Access denied: file outside AI_HOME"
         if not p.exists():
-            return "File not found"
+            return f"File not found: {filepath}"
         if p.stat().st_size > max_size:
-            return p.read_text()[:max_size] + f"\n\n... (truncated, {p.stat().st_size} bytes total)"
-        return p.read_text()
+            return p.read_text(errors='replace')[:max_size] + f"\n\n... (truncated, {p.stat().st_size} bytes total)"
+        return p.read_text(errors='replace')
     except Exception as e:
         return f"Error reading file: {e}"
 
@@ -96,6 +101,7 @@ def get_api_logs():
     for f in sorted(api_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True)[:20]:
         files.append({
             "name": f.name,
+            "path": str(f),
             "size": f.stat().st_size,
             "modified": datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
         })
@@ -107,12 +113,44 @@ def get_security_log():
     return f.read_text() if f.exists() else "No security events."
 
 
+def get_core_log(lines=100):
+    f = LOGS_DIR / "core.log"
+    if not f.exists():
+        return "No core log yet."
+    all_lines = f.read_text().strip().split("\n")
+    return "\n".join(all_lines[-lines:])
+
+
+def get_outbox_messages():
+    f = OUTBOX_DIR / "messages.json"
+    if not f.exists():
+        return []
+    try:
+        return json.loads(f.read_text())
+    except:
+        return []
+
+
+def get_inbox_messages():
+    files = get_file_list(INBOX_DIR, "*.json")
+    messages = []
+    for f in files:
+        try:
+            data = json.loads(Path(f["path"]).read_text())
+            messages.append({**f, "content": data})
+        except:
+            messages.append(f)
+    return messages
+
+
 def get_stats():
     stats = {
         "sessions": get_session_count(),
         "memory_files": len(list(MEMORY_DIR.glob("*.md"))) if MEMORY_DIR.exists() else 0,
         "tools": len(list(TOOLS_DIR.glob("*.py"))) if TOOLS_DIR.exists() else 0,
         "projects": len(list(PROJECTS_DIR.iterdir())) if PROJECTS_DIR.exists() else 0,
+        "inbox": len(list(INBOX_DIR.glob("*.json"))) if INBOX_DIR.exists() else 0,
+        "outbox": len(get_outbox_messages()),
     }
 
     # Token usage from recent API logs
@@ -130,15 +168,52 @@ def get_stats():
     return stats
 
 
+def get_all_files_stats():
+    """Get counts of all file types for the file bar"""
+    stats = []
+
+    # Memory
+    count = len(list(MEMORY_DIR.glob("*.md"))) if MEMORY_DIR.exists() else 0
+    if count: stats.append(("memory", count, "#8b5cf6"))
+
+    # Tools
+    count = len(list(TOOLS_DIR.glob("*.py"))) if TOOLS_DIR.exists() else 0
+    if count: stats.append(("tools", count, "#3b82f6"))
+
+    # Projects
+    count = len(list(PROJECTS_DIR.iterdir())) if PROJECTS_DIR.exists() else 0
+    if count: stats.append(("projects", count, "#10b981"))
+
+    # Inbox
+    count = len(list(INBOX_DIR.glob("*.json"))) if INBOX_DIR.exists() else 0
+    if count: stats.append(("inbox", count, "#f59e0b"))
+
+    # Outbox
+    count = len(get_outbox_messages())
+    if count: stats.append(("outbox", count, "#ef4444"))
+
+    # API logs
+    api_dir = LOGS_DIR / "api"
+    count = len(list(api_dir.iterdir())) if api_dir.exists() else 0
+    if count: stats.append(("api_logs", count, "#06b6d4"))
+
+    return stats
+
+
 # HTML Templates
 def html_page(title, content, nav_active=""):
     nav_items = [
         ("Dashboard", "/"),
         ("Actions", "/actions"),
         ("History", "/history"),
+        ("Identity", "/identity"),
         ("Memory", "/memory"),
         ("Tools", "/tools"),
+        ("Projects", "/projects"),
+        ("Inbox", "/inbox"),
+        ("Outbox", "/outbox"),
         ("API Logs", "/api-logs"),
+        ("Core Log", "/core-log"),
         ("Security", "/security"),
     ]
     nav_html = "".join([
@@ -157,17 +232,17 @@ def html_page(title, content, nav_active=""):
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; }}
         .header {{ background: #161b22; padding: 1rem 2rem; border-bottom: 1px solid #30363d; }}
         .header h1 {{ color: #58a6ff; font-size: 1.5rem; }}
-        .nav {{ background: #161b22; padding: 0.5rem 2rem; border-bottom: 1px solid #30363d; display: flex; gap: 1rem; flex-wrap: wrap; }}
-        .nav a {{ color: #8b949e; text-decoration: none; padding: 0.5rem 1rem; border-radius: 6px; }}
+        .nav {{ background: #161b22; padding: 0.5rem 2rem; border-bottom: 1px solid #30363d; display: flex; gap: 0.5rem; flex-wrap: wrap; }}
+        .nav a {{ color: #8b949e; text-decoration: none; padding: 0.4rem 0.8rem; border-radius: 6px; font-size: 0.9rem; }}
         .nav a:hover {{ background: #21262d; color: #c9d1d9; }}
         .nav a.active {{ background: #21262d; color: #58a6ff; }}
         .content {{ padding: 2rem; max-width: 1400px; margin: 0 auto; }}
         .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }}
         .card h2 {{ color: #58a6ff; font-size: 1rem; margin-bottom: 0.5rem; }}
-        .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem; }}
+        .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 1rem; }}
         .stat {{ text-align: center; }}
         .stat .value {{ font-size: 2rem; color: #58a6ff; }}
-        .stat .label {{ color: #8b949e; font-size: 0.9rem; }}
+        .stat .label {{ color: #8b949e; font-size: 0.85rem; }}
         table {{ width: 100%; border-collapse: collapse; }}
         th, td {{ padding: 0.5rem; text-align: left; border-bottom: 1px solid #30363d; }}
         th {{ color: #8b949e; font-weight: normal; }}
@@ -178,12 +253,19 @@ def html_page(title, content, nav_active=""):
         .badge-red {{ background: #da3633; color: white; }}
         .badge-yellow {{ background: #9e6a03; color: white; }}
         .badge-blue {{ background: #1f6feb; color: white; }}
-        a {{ color: #58a6ff; }}
+        .badge-purple {{ background: #8b5cf6; color: white; }}
+        a {{ color: #58a6ff; text-decoration: none; }}
+        a:hover {{ text-decoration: underline; }}
         .file-list {{ list-style: none; }}
         .file-list li {{ padding: 0.5rem 0; border-bottom: 1px solid #21262d; }}
         .file-list li:last-child {{ border-bottom: none; }}
         .lock-active {{ color: #f85149; }}
-        .refresh {{ float: right; }}
+        .file-bar {{ display: flex; height: 8px; border-radius: 4px; overflow: hidden; margin-bottom: 1rem; background: #21262d; }}
+        .file-bar-segment {{ height: 100%; }}
+        .file-bar-legend {{ display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.8rem; color: #8b949e; }}
+        .file-bar-legend span {{ display: flex; align-items: center; gap: 0.3rem; }}
+        .file-bar-legend .dot {{ width: 10px; height: 10px; border-radius: 50%; }}
+        .empty {{ color: #8b949e; font-style: italic; }}
     </style>
 </head>
 <body>
@@ -200,6 +282,13 @@ def html_page(title, content, nav_active=""):
 </html>"""
 
 
+def make_file_link(filepath, name=None):
+    """Create a safe link to view a file"""
+    encoded_path = quote(str(filepath), safe='')
+    display_name = name or Path(filepath).name
+    return f'<a href="/file?path={encoded_path}">{html.escape(display_name)}</a>'
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # Suppress default logging
@@ -209,20 +298,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
         path = parsed.path
         query = parse_qs(parsed.query)
 
-        if path == "/":
-            self.send_dashboard()
-        elif path == "/actions":
-            self.send_actions()
-        elif path == "/history":
-            self.send_history()
-        elif path == "/memory":
-            self.send_memory()
-        elif path == "/tools":
-            self.send_tools()
-        elif path == "/api-logs":
-            self.send_api_logs()
-        elif path == "/security":
-            self.send_security()
+        routes = {
+            "/": self.send_dashboard,
+            "/actions": self.send_actions,
+            "/history": self.send_history,
+            "/identity": self.send_identity,
+            "/memory": self.send_memory,
+            "/tools": self.send_tools,
+            "/projects": self.send_projects,
+            "/inbox": self.send_inbox,
+            "/outbox": self.send_outbox,
+            "/api-logs": self.send_api_logs,
+            "/core-log": self.send_core_log,
+            "/security": self.send_security,
+        }
+
+        if path in routes:
+            routes[path]()
         elif path == "/file":
             filepath = query.get("path", [""])[0]
             self.send_file_view(filepath)
@@ -239,6 +331,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         stats = get_stats()
         lock = get_lock_status()
         recent = get_recent_actions(10)
+        file_stats = get_all_files_stats()
+
+        # File bar
+        total_files = sum(s[1] for s in file_stats) or 1
+        bar_html = ""
+        legend_html = ""
+        for name, count, color in file_stats:
+            width = (count / total_files) * 100
+            bar_html += f'<div class="file-bar-segment" style="width: {width}%; background: {color};" title="{name}: {count}"></div>'
+            legend_html += f'<span><span class="dot" style="background: {color};"></span>{name}: {count}</span>'
 
         lock_html = ""
         if lock:
@@ -255,6 +357,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 badge_class = "badge-yellow"
             elif "API" in a.get("action", ""):
                 badge_class = "badge-green"
+            elif "TG" in a.get("action", ""):
+                badge_class = "badge-purple"
             actions_html += f'''<tr>
                 <td>{a.get("timestamp", "")}</td>
                 <td><span class="badge {badge_class}">{a.get("action", "")}</span></td>
@@ -262,11 +366,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             </tr>'''
 
         content = f"""
+        <div class="card">
+            <h2>Files Created</h2>
+            <div class="file-bar">{bar_html}</div>
+            <div class="file-bar-legend">{legend_html}</div>
+        </div>
+
         <div class="stats">
             <div class="card stat"><div class="value">{stats['sessions']}</div><div class="label">Sessions</div></div>
-            <div class="card stat"><div class="value">{stats['memory_files']}</div><div class="label">Memory Files</div></div>
+            <div class="card stat"><div class="value">{stats['memory_files']}</div><div class="label">Memory</div></div>
             <div class="card stat"><div class="value">{stats['tools']}</div><div class="label">Tools</div></div>
-            <div class="card stat"><div class="value">{stats['total_tokens']:,}</div><div class="label">Total Tokens</div></div>
+            <div class="card stat"><div class="value">{stats['projects']}</div><div class="label">Projects</div></div>
+            <div class="card stat"><div class="value">{stats['outbox']}</div><div class="label">Outbox</div></div>
+            <div class="card stat"><div class="value">{stats['total_tokens']:,}</div><div class="label">Tokens</div></div>
         </div>
 
         <div class="card">
@@ -278,7 +390,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             <h2>Recent Actions</h2>
             <table>
                 <tr><th>Time</th><th>Action</th><th>Session</th></tr>
-                {actions_html}
+                {actions_html if actions_html else '<tr><td colspan="3" class="empty">No actions yet</td></tr>'}
             </table>
             <p style="margin-top: 1rem;"><a href="/actions">View all actions &rarr;</a></p>
         </div>
@@ -302,7 +414,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             <h2>All Actions (last 100)</h2>
             <table>
                 <tr><th>Time</th><th>Session</th><th>Action</th><th>Details</th></tr>
-                {rows}
+                {rows if rows else '<tr><td colspan="4" class="empty">No actions yet</td></tr>'}
             </table>
         </div>
         """
@@ -318,13 +430,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
         """
         self.send_html(html_page("History", content, "History"))
 
+    def send_identity(self):
+        identity = html.escape(read_file_safe(str(SELF_PATH)))
+        content = f"""
+        <div class="card">
+            <h2>Agent Identity (self.md)</h2>
+            <p style="color: #8b949e; margin-bottom: 1rem;">{SELF_PATH}</p>
+            <pre><code>{identity}</code></pre>
+        </div>
+        """
+        self.send_html(html_page("Identity", content, "Identity"))
+
     def send_memory(self):
-        files = get_file_list(MEMORY_DIR)
+        files = get_file_list(MEMORY_DIR, "*.md")
         rows = ""
         for f in files:
-            path = MEMORY_DIR / f["name"]
             rows += f'''<tr>
-                <td><a href="/file?path={path}">{f["name"]}</a></td>
+                <td>{make_file_link(f["path"], f["name"])}</td>
                 <td>{f["size"]} bytes</td>
                 <td>{f["modified"]}</td>
             </tr>'''
@@ -334,19 +456,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
             <h2>Memory Files</h2>
             <table>
                 <tr><th>Name</th><th>Size</th><th>Modified</th></tr>
-                {rows}
+                {rows if rows else '<tr><td colspan="3" class="empty">No memory files yet</td></tr>'}
             </table>
         </div>
         """
         self.send_html(html_page("Memory", content, "Memory"))
 
     def send_tools(self):
-        files = get_file_list(TOOLS_DIR)
+        files = get_file_list(TOOLS_DIR, "*.py")
         rows = ""
         for f in files:
-            path = TOOLS_DIR / f["name"]
             rows += f'''<tr>
-                <td><a href="/file?path={path}">{f["name"]}</a></td>
+                <td>{make_file_link(f["path"], f["name"])}</td>
                 <td>{f["size"]} bytes</td>
                 <td>{f["modified"]}</td>
             </tr>'''
@@ -356,20 +477,101 @@ class DashboardHandler(BaseHTTPRequestHandler):
             <h2>Agent Tools</h2>
             <table>
                 <tr><th>Name</th><th>Size</th><th>Modified</th></tr>
-                {rows}
+                {rows if rows else '<tr><td colspan="3" class="empty">No tools yet</td></tr>'}
             </table>
         </div>
         """
         self.send_html(html_page("Tools", content, "Tools"))
 
+    def send_projects(self):
+        if not PROJECTS_DIR.exists():
+            rows = ""
+        else:
+            rows = ""
+            for p in sorted(PROJECTS_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True)[:20]:
+                if p.is_dir():
+                    file_count = len(list(p.rglob("*")))
+                    rows += f'''<tr>
+                        <td>{html.escape(p.name)}/</td>
+                        <td>{file_count} files</td>
+                        <td>{datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")}</td>
+                    </tr>'''
+                else:
+                    rows += f'''<tr>
+                        <td>{make_file_link(str(p), p.name)}</td>
+                        <td>{p.stat().st_size} bytes</td>
+                        <td>{datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")}</td>
+                    </tr>'''
+
+        content = f"""
+        <div class="card">
+            <h2>Projects</h2>
+            <table>
+                <tr><th>Name</th><th>Size</th><th>Modified</th></tr>
+                {rows if rows else '<tr><td colspan="3" class="empty">No projects yet</td></tr>'}
+            </table>
+        </div>
+        """
+        self.send_html(html_page("Projects", content, "Projects"))
+
+    def send_inbox(self):
+        messages = get_inbox_messages()
+        rows = ""
+        for m in messages:
+            content_preview = ""
+            if isinstance(m.get("content"), dict):
+                content_preview = html.escape(json.dumps(m["content"], ensure_ascii=False)[:100])
+            rows += f'''<tr>
+                <td>{make_file_link(m["path"], m["name"])}</td>
+                <td><code>{content_preview}</code></td>
+                <td>{m["modified"]}</td>
+            </tr>'''
+
+        content = f"""
+        <div class="card">
+            <h2>Inbox (External Messages)</h2>
+            <p style="color: #8b949e; margin-bottom: 1rem;">Messages from human to agent</p>
+            <table>
+                <tr><th>File</th><th>Content</th><th>Modified</th></tr>
+                {rows if rows else '<tr><td colspan="3" class="empty">Inbox empty</td></tr>'}
+            </table>
+        </div>
+        """
+        self.send_html(html_page("Inbox", content, "Inbox"))
+
+    def send_outbox(self):
+        messages = get_outbox_messages()
+        rows = ""
+        for m in messages:
+            msg_type = m.get("type", "thought")
+            badge_class = {"thought": "badge-blue", "poem": "badge-purple", "response": "badge-green"}.get(msg_type, "badge-blue")
+            content_preview = html.escape(m.get("content", "")[:100])
+            rows += f'''<tr>
+                <td>{m.get("timestamp", "")[:19]}</td>
+                <td>Session {m.get("session", "?")}</td>
+                <td><span class="badge {badge_class}">{msg_type}</span></td>
+                <td>{content_preview}...</td>
+            </tr>'''
+
+        content = f"""
+        <div class="card">
+            <h2>Outbox (Pending Messages)</h2>
+            <p style="color: #8b949e; margin-bottom: 1rem;">Messages waiting to be sent to Telegram</p>
+            <table>
+                <tr><th>Time</th><th>Session</th><th>Type</th><th>Content</th></tr>
+                {rows if rows else '<tr><td colspan="4" class="empty">Outbox empty</td></tr>'}
+            </table>
+        </div>
+        """
+        self.send_html(html_page("Outbox", content, "Outbox"))
+
     def send_api_logs(self):
         files = get_api_logs()
         rows = ""
         for f in files:
-            path = LOGS_DIR / "api" / f["name"]
             badge = "badge-green" if "output" in f["name"] else "badge-blue"
             rows += f'''<tr>
-                <td><a href="/file?path={path}">{f["name"]}</a></td>
+                <td>{make_file_link(f["path"], f["name"])}</td>
                 <td><span class="badge {badge}">{"response" if "output" in f["name"] else "request"}</span></td>
                 <td>{f["size"]} bytes</td>
                 <td>{f["modified"]}</td>
@@ -380,11 +582,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
             <h2>API Logs (last 20)</h2>
             <table>
                 <tr><th>File</th><th>Type</th><th>Size</th><th>Time</th></tr>
-                {rows}
+                {rows if rows else '<tr><td colspan="4" class="empty">No API logs yet</td></tr>'}
             </table>
         </div>
         """
         self.send_html(html_page("API Logs", content, "API Logs"))
+
+    def send_core_log(self):
+        log = html.escape(get_core_log(200))
+        content = f"""
+        <div class="card">
+            <h2>Core Log (last 200 lines)</h2>
+            <pre><code>{log}</code></pre>
+        </div>
+        """
+        self.send_html(html_page("Core Log", content, "Core Log"))
 
     def send_security(self):
         log = html.escape(get_security_log())
@@ -397,12 +609,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_html(html_page("Security", content, "Security"))
 
     def send_file_view(self, filepath):
-        content_text = html.escape(read_file_safe(filepath))
-        filename = Path(filepath).name if filepath else "Unknown"
+        # Decode the path
+        decoded_path = unquote(filepath)
+        content_text = html.escape(read_file_safe(decoded_path))
+        filename = Path(decoded_path).name if decoded_path else "Unknown"
         content = f"""
         <div class="card">
             <h2>{html.escape(filename)}</h2>
-            <p style="color: #8b949e; margin-bottom: 1rem;">{html.escape(filepath)}</p>
+            <p style="color: #8b949e; margin-bottom: 1rem;">{html.escape(decoded_path)}</p>
             <pre><code>{content_text}</code></pre>
         </div>
         """
