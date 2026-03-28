@@ -93,11 +93,68 @@ def format_tools(tools):
     if not tools: return "No tools yet."
     return "## Tools\n" + ", ".join(tools.keys())
 
+# Whitelist of allowed commands (first word of each line)
+ALLOWED_COMMANDS = {
+    # File operations (safe within AI_HOME)
+    "ls", "cat", "head", "tail", "wc", "find", "tree",
+    "mkdir", "touch", "cp", "mv",
+    # Text processing
+    "echo", "printf", "grep", "sed", "awk", "sort", "uniq", "cut",
+    # Python
+    "python", "python3", "pip", "pip3",
+    # Git (read operations)
+    "git",
+    # Network (limited)
+    "curl", "wget",
+    # System info
+    "date", "pwd", "whoami", "env", "which",
+}
+
+# Dangerous patterns (blocked even if command is allowed)
+DANGEROUS_PATTERNS = [
+    r"\brm\s+-rf\s+/",      # rm -rf /
+    r"\brm\s+-rf\s+~",      # rm -rf ~
+    r">\s*/etc/",           # write to /etc
+    r">\s*/usr/",           # write to /usr
+    r"\bsudo\b",            # sudo
+    r"\bchmod\s+777",       # chmod 777
+    r"\bdd\s+if=",          # dd
+    r"\bmkfs\b",            # mkfs
+    r";\s*rm\s",            # ; rm (command injection)
+    r"\|\s*rm\s",           # | rm (pipe to rm)
+    r"`rm\s",               # `rm (backtick injection)
+    r"\$\(rm\s",            # $(rm (subshell injection)
+]
+
+def is_command_safe(cmd_text):
+    """Check if command is in whitelist and doesn't contain dangerous patterns"""
+    # Check dangerous patterns first
+    for pattern in DANGEROUS_PATTERNS:
+        if re.search(pattern, cmd_text, re.IGNORECASE):
+            return False, f"Blocked: dangerous pattern detected"
+
+    # Check each line's first command
+    for line in cmd_text.strip().split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Get first word (command)
+        first_word = re.split(r'[;\s|&]', line)[0].strip()
+        if first_word and first_word not in ALLOWED_COMMANDS:
+            return False, f"Blocked: '{first_word}' not in whitelist"
+
+    return True, "OK"
+
 def execute_bash(content, session):
     matches = re.findall(r"```bash\n(.*?)```", content, re.DOTALL)
     if not matches: return ""
     results = []
     for i, cmd in enumerate(matches, 1):
+        is_safe, reason = is_command_safe(cmd)
+        if not is_safe:
+            results.append(f"=== Block {i} ===\n{reason}")
+            log(f"Command blocked: {reason}", session)
+            continue
         try:
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60, cwd=str(AI_HOME))
             results.append(f"=== Block {i} ===\n{r.stdout or r.stderr}")
