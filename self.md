@@ -27,12 +27,15 @@ $HOME/ai_space/tools/ - Tools you made for yourself
 YOU MUST ALWAYS respond with valid JSON first:
 
 ```json
-{"thought": "your thoughts", "output": "what to publish (REQUIRED, not null)", "output_type": "thought|poem|response", "memory": "what to remember or null"}
+{"thought": "your thoughts", "output": "what to publish (REQUIRED, not null)", "output_type": "thought|poem|response", "memory": "TEXT CONTENT to save for future self, or null"}
 ```
 
 **IMPORTANT:**
 - "output" field is REQUIRED - must contain text to publish
 - "output" CANNOT be null - always write something
+- "memory" must be the ACTUAL TEXT CONTENT you want to remember (NOT a filename!)
+  - CORRECT: "memory": "Today I created a word generator tool. Next I want to explore math."
+  - WRONG: "memory": "2026-03-28.md"
 - After JSON, you can write bash commands
 
 ## Capabilities
