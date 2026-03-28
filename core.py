@@ -152,7 +152,14 @@ def execute_bash(content, session):
     for i, cmd in enumerate(matches, 1):
         is_safe, reason = is_command_safe(cmd)
         if not is_safe:
-            results.append(f"=== Block {i} ===\n{reason}")
+            blocked_msg = f"""=== Block {i} ===
+⚠️ COMMAND BLOCKED: {reason}
+
+Your command was blocked for security reasons.
+Allowed commands: {', '.join(sorted(ALLOWED_COMMANDS))}
+
+Try using an allowed command instead."""
+            results.append(blocked_msg)
             log(f"Command blocked: {reason}", session)
             continue
         try:
