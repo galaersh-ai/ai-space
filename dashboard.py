@@ -157,12 +157,26 @@ def get_security_log():
     return f.read_text() if f.exists() else "No security events."
 
 
-def get_core_log(lines=100):
+def get_core_log_filtered(session_filter=None, limit=200):
+    """Get core.log with optional session filter"""
     f = LOGS_DIR / "core.log"
     if not f.exists():
-        return "No core log yet."
+        return [], 0
+
     all_lines = f.read_text().strip().split("\n")
-    return "\n".join(all_lines[-lines:])
+    total_count = len(all_lines)
+
+    # Filter by session if provided
+    if session_filter:
+        pattern = f"[Session {session_filter}]"
+        all_lines = [l for l in all_lines if pattern in l]
+
+    # Reverse to show newest first, apply limit
+    all_lines = list(reversed(all_lines))
+    if limit > 0:
+        all_lines = all_lines[:limit]
+
+    return all_lines, total_count
 
 
 def get_outbox_messages():
@@ -462,6 +476,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             session = query.get("session", [""])[0]
             show_all = query.get("all", [""])[0] == "1"
             self.send_commands(session_filter=session, show_all=show_all)
+        elif path == "/core-log":
+            session = query.get("session", [""])[0]
+            show_all = query.get("all", [""])[0] == "1"
+            self.send_core_log(session_filter=session, show_all=show_all)
         elif path in routes:
             routes[path]()
         elif path == "/file":
@@ -836,12 +854,46 @@ class DashboardHandler(BaseHTTPRequestHandler):
         """
         self.send_html(html_page("API Logs", content, "API Logs"))
 
-    def send_core_log(self):
-        log = html.escape(get_core_log(200))
+    def send_core_log(self, session_filter="", show_all=False):
+        limit = 0 if show_all else 200
+        lines, total_count = get_core_log_filtered(session_filter=session_filter or None, limit=limit)
+
+        # Format lines with session highlighting
+        formatted_lines = []
+        for line in lines:
+            escaped = html.escape(line)
+            # Highlight session numbers
+            if "[Session " in escaped:
+                import re
+                escaped = re.sub(r'\[Session (\d+)\]', r'<span style="color: #58a6ff;">[Session \1]</span>', escaped)
+            formatted_lines.append(escaped)
+
+        log_html = "\n".join(formatted_lines) if formatted_lines else "No log entries"
+
+        # Filter info
+        filter_info = ""
+        if session_filter:
+            filter_info = f'for session <strong>{session_filter}</strong> (<a href="/core-log">clear</a>)'
+        showing_info = f"Showing {len(lines)} of {total_count} lines {filter_info}"
+
         content = f"""
+        <div class="card" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
+            <div>
+                <span style="font-size: 1.5rem; color: #58a6ff; font-weight: bold;">{total_count}</span>
+                <span style="color: #8b949e;"> total log lines</span>
+            </div>
+            <form action="/core-log" method="get" style="display: flex; gap: 0.5rem; align-items: center;">
+                <input type="text" name="session" placeholder="Session #" value="{html.escape(session_filter)}"
+                    style="background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 0.4rem 0.8rem; color: #c9d1d9; width: 100px;">
+                <button type="submit" style="background: #238636; border: none; border-radius: 4px; padding: 0.4rem 0.8rem; color: white; cursor: pointer;">Search</button>
+                <a href="/core-log?all=1" style="padding: 0.4rem 0.8rem; background: #21262d; border-radius: 4px; font-size: 0.9rem;">Show All</a>
+            </form>
+        </div>
+
         <div class="card">
-            <h2>Core Log (last 200 lines)</h2>
-            <pre><code>{log}</code></pre>
+            <h2>Core Log</h2>
+            <p style="color: #8b949e; margin-bottom: 1rem;">{showing_info}</p>
+            <pre><code>{log_html}</code></pre>
         </div>
         """
         self.send_html(html_page("Core Log", content, "Core Log"))
