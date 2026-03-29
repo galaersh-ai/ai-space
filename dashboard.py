@@ -239,6 +239,76 @@ def get_all_files_stats():
     return stats
 
 
+def get_commands(session_filter=None, limit=50):
+    """Get executed commands from actions.log"""
+    f = LOGS_DIR / "actions.log"
+    if not f.exists():
+        return [], 0
+
+    commands = []
+    all_actions = []
+
+    for line in f.read_text().strip().split("\n"):
+        try:
+            action = json.loads(line)
+            if action.get("action") in ("BASH_EXEC", "BASH_RESULT", "BASH_TIMEOUT", "BASH_ERROR", "SECURITY_BLOCK"):
+                all_actions.append(action)
+        except:
+            pass
+
+    # Group BASH_EXEC with their results
+    i = 0
+    while i < len(all_actions):
+        a = all_actions[i]
+        if a.get("action") == "BASH_EXEC":
+            cmd = {
+                "timestamp": a.get("timestamp", ""),
+                "session": a.get("session", "?"),
+                "step": a.get("details", {}).get("step", "?"),
+                "command": a.get("details", {}).get("command", ""),
+                "status": "running",
+                "exit_code": None
+            }
+            # Look for result
+            if i + 1 < len(all_actions):
+                next_a = all_actions[i + 1]
+                if next_a.get("action") == "BASH_RESULT":
+                    cmd["status"] = "success" if next_a.get("details", {}).get("exit_code", 1) == 0 else "error"
+                    cmd["exit_code"] = next_a.get("details", {}).get("exit_code")
+                    i += 1
+                elif next_a.get("action") == "BASH_TIMEOUT":
+                    cmd["status"] = "timeout"
+                    i += 1
+                elif next_a.get("action") == "BASH_ERROR":
+                    cmd["status"] = "error"
+                    i += 1
+            commands.append(cmd)
+        elif a.get("action") == "SECURITY_BLOCK":
+            commands.append({
+                "timestamp": a.get("timestamp", ""),
+                "session": a.get("session", "?"),
+                "step": "—",
+                "command": a.get("details", {}).get("command", ""),
+                "status": "blocked",
+                "exit_code": None,
+                "reason": a.get("details", {}).get("reason", "")
+            })
+        i += 1
+
+    total_count = len(commands)
+
+    # Filter by session
+    if session_filter:
+        commands = [c for c in commands if str(c.get("session")) == str(session_filter)]
+
+    # Reverse to show newest first, apply limit
+    commands = list(reversed(commands))
+    if limit > 0:
+        commands = commands[:limit]
+
+    return commands, total_count
+
+
 def get_api_logs_filtered(session_filter=None, limit=20):
     """Get API logs with optional session filter"""
     api_dir = LOGS_DIR / "api"
@@ -275,6 +345,7 @@ def html_page(title, content, nav_active=""):
     nav_items = [
         ("Dashboard", "/"),
         ("Actions", "/actions"),
+        ("Commands", "/commands"),
         ("History", "/history"),
         ("Identity", "/identity"),
         ("Memory", "/memory"),
@@ -387,6 +458,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             session = query.get("session", [""])[0]
             show_all = query.get("all", [""])[0] == "1"
             self.send_api_logs(session_filter=session, show_all=show_all)
+        elif path == "/commands":
+            session = query.get("session", [""])[0]
+            show_all = query.get("all", [""])[0] == "1"
+            self.send_commands(session_filter=session, show_all=show_all)
         elif path in routes:
             routes[path]()
         elif path == "/file":
@@ -494,6 +569,74 @@ class DashboardHandler(BaseHTTPRequestHandler):
         </div>
         """
         self.send_html(html_page("Actions", content, "Actions"))
+
+    def send_commands(self, session_filter="", show_all=False):
+        limit = 0 if show_all else 50
+        commands, total_count = get_commands(session_filter=session_filter or None, limit=limit)
+
+        rows = ""
+        for c in commands:
+            status = c.get("status", "?")
+            # Status badge
+            if status == "success":
+                badge = '<span class="badge badge-green">✓ success</span>'
+            elif status == "blocked":
+                badge = '<span class="badge badge-red">🚫 blocked</span>'
+            elif status == "timeout":
+                badge = '<span class="badge badge-yellow">⏱ timeout</span>'
+            elif status == "error":
+                badge = '<span class="badge badge-red">✗ error</span>'
+            else:
+                badge = '<span class="badge badge-blue">⋯ running</span>'
+
+            # Command preview (escape and truncate)
+            cmd_preview = html.escape(c.get("command", "")[:80])
+            if len(c.get("command", "")) > 80:
+                cmd_preview += "..."
+
+            # Extra info for blocked
+            extra = ""
+            if status == "blocked" and c.get("reason"):
+                extra = f'<br><small style="color: #f85149;">{html.escape(c.get("reason", ""))}</small>'
+
+            rows += f'''<tr>
+                <td>{c.get("timestamp", "")}</td>
+                <td><a href="/commands?session={c.get("session", "")}">{c.get("session", "?")}</a></td>
+                <td>{c.get("step", "—")}</td>
+                <td><code>{cmd_preview}</code>{extra}</td>
+                <td>{badge}</td>
+            </tr>'''
+
+        # Filter info
+        filter_info = ""
+        if session_filter:
+            filter_info = f'for session <strong>{session_filter}</strong> (<a href="/commands">clear</a>)'
+        showing_info = f"Showing {len(commands)} of {total_count} commands {filter_info}"
+
+        content = f"""
+        <div class="card" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
+            <div>
+                <span style="font-size: 1.5rem; color: #58a6ff; font-weight: bold;">{total_count}</span>
+                <span style="color: #8b949e;"> total commands executed</span>
+            </div>
+            <form action="/commands" method="get" style="display: flex; gap: 0.5rem; align-items: center;">
+                <input type="text" name="session" placeholder="Session #" value="{html.escape(session_filter)}"
+                    style="background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 0.4rem 0.8rem; color: #c9d1d9; width: 100px;">
+                <button type="submit" style="background: #238636; border: none; border-radius: 4px; padding: 0.4rem 0.8rem; color: white; cursor: pointer;">Search</button>
+                <a href="/commands?all=1" style="padding: 0.4rem 0.8rem; background: #21262d; border-radius: 4px; font-size: 0.9rem;">Show All</a>
+            </form>
+        </div>
+
+        <div class="card">
+            <h2>Executed Commands</h2>
+            <p style="color: #8b949e; margin-bottom: 1rem;">{showing_info}</p>
+            <table>
+                <tr><th>Time</th><th>Session</th><th>Step</th><th>Command</th><th>Status</th></tr>
+                {rows if rows else '<tr><td colspan="5" class="empty">No commands yet</td></tr>'}
+            </table>
+        </div>
+        """
+        self.send_html(html_page("Commands", content, "Commands"))
 
     def send_history(self):
         history = html.escape(get_history())
